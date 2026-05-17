@@ -417,3 +417,21 @@ st.download_button(
     file_name="mock_etf_value_history.csv",
     mime="text/csv",
 )
+
+underlying_prices = (
+    basket.prices
+    .reset_index()
+    .rename(columns={"index": "date"})
+    .melt(id_vars="date", var_name="ticker", value_name="closing_price")
+)
+underlying_prices["cohort"] = underlying_prices["ticker"].map(TICKER_TO_TIER)
+underlying_prices = underlying_prices[["date", "ticker", "cohort", "closing_price"]]
+underlying_prices = underlying_prices.sort_values(["date", "cohort", "ticker"])
+underlying_prices["date"] = underlying_prices["date"].dt.strftime("%Y-%m-%d")
+
+st.download_button(
+    "Download underlying price data CSV",
+    underlying_prices.to_csv(index=False).encode("utf-8"),
+    file_name="mock_etf_underlying_prices_by_cohort.csv",
+    mime="text/csv",
+)
