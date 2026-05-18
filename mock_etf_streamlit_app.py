@@ -86,7 +86,7 @@ class BasketResult:
     excluded_tickers: List[str]
 
 
-st.set_page_config(page_title="Mock ETF Tracker for AI-fueled cohorts", page_icon="📈", layout="wide")
+st.set_page_config(page_title="Mock ETF Tracker for AI-fueled ticker cohorts", page_icon="📈", layout="wide")
 
 st.title("Mock ETF Tracker")
 st.caption("Synthetic equal-dollar basket with tier sleeves. Research tool only.")
