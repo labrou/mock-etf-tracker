@@ -10,7 +10,6 @@ What it does:
 - Defaults to equal-dollar weighting by ticker at the selected start date.
 - Preserves the tier structure as sleeves.
 - Tracks historical value using adjusted close data from Yahoo Finance via yfinance.
-- Allows a simple future projection by entering target prices for a future date.
 - Defaults the historical start date to 2024-01-01 and starts the basket with tickers that had data at that date.
 
 This is for research/watchlist use, not investment advice.
@@ -68,8 +67,11 @@ TIERS: Dict[str, List[str]] = {
     "Tier 13 — Semi cap equipment, diversified end-markets": [
         "AMAT", "LRCX", "KLAC", "NVMI", "ONTO"
     ],
-    "Tier 14 — Hyperscalers": [
-        "AMZN", "GOOG", "META", "MSFT", "NVDA"
+    "Tier 14 — The Champ Chips": [
+        "NVDA", "AVGO", "AMD", "MRVL", "ARM", "INTC"
+    ],
+    "Tier 15 — Hyperscalers": [
+        "AMZN", "GOOGL", "META", "MSFT", "ORCL"
     ],
 }
 
@@ -92,7 +94,15 @@ class BasketResult:
 st.set_page_config(page_title="Mock ETF Tracker for AI-fueled ticker cohorts", page_icon="📈", layout="wide")
 
 st.title("Mock ETF Tracker for AI-fueled ticker cohorts")
-st.caption("Synthetic equal-dollar basket with tier sleeves. Research tool only.")
+
+DEFAULT_SUBTITLE = (
+    "This app builds a synthetic equal-dollar basket from user-defined AI-related ticker cohorts. "
+    "It downloads adjusted historical prices, creates fixed-share holdings from the selected start date, "
+    "tracks total basket value, compares cohort sleeves, displays current sleeve weights, and exports the underlying price data. "
+    "Research/watchlist tool only; not investment advice."
+)
+
+st.caption(DEFAULT_SUBTITLE)
 
 
 @st.cache_data(show_spinner=False, ttl=60 * 60)
@@ -302,22 +312,39 @@ plot_df = basket.total_value.rename("Mock ETF value").reset_index().rename(colum
 fig = px.line(plot_df, x="Date", y="Mock ETF value")
 st.plotly_chart(fig, use_container_width=True)
 
-left, right = st.columns(2)
+st.subheader("Tier sleeves")
+tier_plot = basket.value_by_tier.reset_index()
+tier_plot = tier_plot.rename(columns={tier_plot.columns[0]: "Date"})
+tier_long = tier_plot.melt(id_vars="Date", var_name="Tier", value_name="Value")
+fig_tier = px.line(tier_long, x="Date", y="Value", color="Tier")
+st.plotly_chart(fig_tier, use_container_width=True)
 
-with left:
-    st.subheader("Tier sleeves")
-    tier_plot = basket.value_by_tier.reset_index().rename(columns={"index": "Date"})
-    tier_long = tier_plot.melt(id_vars="Date", var_name="Tier", value_name="Value")
-    fig_tier = px.line(tier_long, x="Date", y="Value", color="Tier")
-    st.plotly_chart(fig_tier, use_container_width=True)
+st.subheader("Tier sleeves — faceted view")
+st.caption("Each selected sleeve gets its own chart; charts wrap three per row.")
+facet_rows = max(1, (basket.value_by_tier.shape[1] + 2) // 3)
+fig_tier_faceted = px.line(
+    tier_long,
+    x="Date",
+    y="Value",
+    facet_col="Tier",
+    facet_col_wrap=3,
+    height=max(420, 280 * facet_rows),
+)
+# Force each facet to use its own independent y-axis scale.
+fig_tier_faceted.update_yaxes(matches=None, showticklabels=True)
+for axis_name in fig_tier_faceted.layout:
+    if axis_name.startswith("yaxis"):
+        fig_tier_faceted.layout[axis_name].matches = None
 
-with right:
-    st.subheader("Current sleeve weights")
-    latest_tiers = basket.value_by_tier.iloc[-1].sort_values(ascending=False)
-    weights = (latest_tiers / latest_tiers.sum()).rename("Weight").reset_index()
-    weights.columns = ["Tier", "Weight"]
-    fig_weights = px.bar(weights, x="Tier", y="Weight")
-    st.plotly_chart(fig_weights, use_container_width=True)
+fig_tier_faceted.for_each_annotation(lambda annotation: annotation.update(text=annotation.text.split("=")[-1]))
+st.plotly_chart(fig_tier_faceted, use_container_width=True)
+
+st.subheader("Current sleeve weights")
+latest_tiers = basket.value_by_tier.iloc[-1].sort_values(ascending=False)
+weights = (latest_tiers / latest_tiers.sum()).rename("Weight").reset_index()
+weights.columns = ["Tier", "Weight"]
+fig_weights = px.bar(weights, x="Tier", y="Weight")
+st.plotly_chart(fig_weights, use_container_width=True)
 
 st.subheader("Holdings")
 holdings = pd.DataFrame({
@@ -372,40 +399,6 @@ if chart_tickers:
     st.plotly_chart(fig_tickers, use_container_width=True)
 else:
     st.info("Select one or more holdings to view individual charts.")
-
-st.subheader("Simple future projection")
-st.caption("Enter future target prices. Blank values use the latest observed price.")
-
-future_date = st.date_input("Projection date", value=end_date + dt.timedelta(days=90))
-
-future_prices = {}
-cols = st.columns(4)
-for i, ticker in enumerate(basket.included_tickers):
-    latest_price = float(basket.prices[ticker].iloc[-1])
-    with cols[i % 4]:
-        entered = st.text_input(ticker, value="", placeholder=f"Latest: {latest_price:.2f}")
-    try:
-        future_prices[ticker] = float(entered) if entered.strip() else latest_price
-    except ValueError:
-        future_prices[ticker] = latest_price
-
-future_prices_s = pd.Series(future_prices)
-future_value_by_ticker = future_prices_s * basket.shares
-future_total = future_value_by_ticker.sum()
-future_return_from_start = future_total / start_value - 1
-future_return_from_latest = future_total / latest_value - 1
-
-p1, p2, p3 = st.columns(3)
-p1.metric("Projected ETF value", f"${future_total:,.2f}", f"{future_return_from_latest:.2%} vs latest")
-p2.metric("Projected return from start", f"{future_return_from_start:.2%}")
-p3.metric("Projection date", future_date.isoformat())
-
-projected_line = basket.total_value.copy()
-projected_line.loc[pd.Timestamp(future_date)] = future_total
-projected_line = projected_line.sort_index()
-projected_df = projected_line.rename("Value").reset_index().rename(columns={"index": "Date"})
-fig_projection = px.line(projected_df, x="Date", y="Value")
-st.plotly_chart(fig_projection, use_container_width=True)
 
 st.download_button(
     "Download holdings CSV",
