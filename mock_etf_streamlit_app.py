@@ -42,7 +42,7 @@ TIERS: Dict[str, List[str]] = {
         "BBAI", "SOUN", "AI", "TEM", "SERV", "SYM", "PATH"
     ],
     "Tier 5 — AI-software extreme multiples, real revenue": [
-        "PLTR", "APP", "SNOW", "NET", "DDOG", "MDB", "CFLT", "ESTC", "GTLB", "FROG", "TTD",
+        "PLTR", "APP", "SNOW", "NET", "DDOG", "MDB", "ESTC", "GTLB", "FROG", "TTD",
         "CRWD", "NOW", "ZS"
     ],
     "Tier 6 — AI infra real-but-stretched, AI-priced multiples": [
@@ -167,7 +167,9 @@ def build_basket(
     tiers: Dict[str, List[str]],
     ticker_to_tier: Dict[str, str],
 ) -> BasketResult:
-    raw = prices[selected_tickers].copy().dropna(how="all")
+    # Only attempt to process tickers that were successfully downloaded
+    valid_tickers = [t for t in selected_tickers if t in prices.columns]
+    raw = prices[valid_tickers].copy().dropna(how="all")
     if raw.empty:
         raise ValueError("No usable prices found for the selected basket.")
 
