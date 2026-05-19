@@ -10,7 +10,8 @@ What it does:
 - Defaults to equal-dollar weighting by ticker at the selected start date.
 - Preserves the tier structure as sleeves.
 - Tracks historical value using adjusted close data from Yahoo Finance via yfinance.
-- Defaults the historical start date to 2024-01-01 and starts the basket with tickers that had data at that date.
+- Defaults the historical start date to 2024-01-01.
+- Handles tickers without start-date data through staged entry: their allocation is held as cash until the first available close.
 
 This is for research/watchlist use, not investment advice.
 """
@@ -25,6 +26,7 @@ import pandas as pd
 import plotly.express as px
 import streamlit as st
 import yfinance as yf
+
 
 TIERS: Dict[str, List[str]] = {
     "Tier 1 — Pre-revenue speculative, highest canary value": [
@@ -75,7 +77,6 @@ TIERS: Dict[str, List[str]] = {
     ],
 }
 
-
 ALL_TICKERS = [ticker for tickers in TIERS.values() for ticker in tickers]
 TICKER_TO_TIER = {ticker: tier for tier, tickers in TIERS.items() for ticker in tickers}
 
@@ -88,8 +89,10 @@ class BasketResult:
     value_by_tier: pd.DataFrame
     total_value: pd.Series
     start_prices: pd.Series
+    start_dates: pd.Series
     included_tickers: List[str]
     excluded_tickers: List[str]
+    delayed_tickers: List[str]
 
 
 st.set_page_config(page_title="Mock ETF Tracker for AI-fueled ticker cohorts", page_icon="📈", layout="wide")
@@ -163,29 +166,40 @@ def build_basket(
     selected_tickers: List[str],
     base_value: float,
     weighting_mode: str,
+    staged_entry: bool,
 ) -> BasketResult:
-    clean = prices[selected_tickers].copy()
-
-    # Start on the first trading day in the requested window.
-    # Do NOT wait for every ticker to have history. Newer IPOs / ticker changes
-    # would otherwise move the whole basket start date forward.
-    clean = clean.dropna(how="all").ffill()
-    if clean.empty:
+    raw = prices[selected_tickers].copy().dropna(how="all")
+    if raw.empty:
         raise ValueError("No usable prices found for the selected basket.")
 
-    actual_start_date = clean.index.min()
-    start_row = clean.loc[actual_start_date]
+    actual_start_date = raw.index.min()
+    first_valid_dates = raw.apply(lambda s: s.first_valid_index())
 
-    # Include only tickers that already had price data at the basket start.
-    # This preserves a true equal-dollar basket from the beginning date.
-    included = start_row.dropna().index.tolist()
+    # Include every selected ticker that has at least one usable price somewhere
+    # in the selected date range. Tickers that begin later are staged in.
+    included = first_valid_dates.dropna().index.tolist()
     excluded = [t for t in selected_tickers if t not in included]
 
     if not included:
-        raise ValueError("No selected tickers had usable prices at the basket start date.")
+        raise ValueError("No selected tickers had usable prices in the selected date range.")
 
-    clean = clean[included].loc[actual_start_date:].ffill()
-    start_prices = clean.iloc[0]
+    start_row = raw.loc[actual_start_date, included]
+    delayed_tickers = [t for t in included if pd.isna(start_row[t])]
+
+    if not staged_entry:
+        included = [t for t in included if t not in delayed_tickers]
+        excluded = [t for t in selected_tickers if t not in included]
+        delayed_tickers = []
+        if not included:
+            raise ValueError("No selected tickers had usable prices at the basket start date.")
+
+    start_dates = first_valid_dates[included]
+    start_prices = pd.Series(
+        {ticker: raw.loc[start_dates[ticker], ticker] for ticker in included},
+        name="Start price",
+    )
+
+    clean = raw[included].loc[actual_start_date:].ffill()
 
     if weighting_mode == "Equal weight each ticker":
         allocation = pd.Series(base_value / len(included), index=included)
@@ -199,6 +213,15 @@ def build_basket(
 
     shares = allocation / start_prices
     value_by_ticker = clean.multiply(shares, axis=1)
+
+    if staged_entry:
+        # Before a ticker has a first available price, hold its intended
+        # allocation as cash. On the first available close, the position enters.
+        cash_reserve = pd.DataFrame(0.0, index=value_by_ticker.index, columns=included)
+        for ticker in included:
+            cash_reserve.loc[value_by_ticker.index < start_dates[ticker], ticker] = allocation[ticker]
+        value_by_ticker = value_by_ticker.fillna(0.0) + cash_reserve
+
     total_value = value_by_ticker.sum(axis=1)
 
     tier_frames = []
@@ -215,8 +238,10 @@ def build_basket(
         value_by_tier=value_by_tier,
         total_value=total_value,
         start_prices=start_prices,
+        start_dates=start_dates,
         included_tickers=included,
         excluded_tickers=excluded,
+        delayed_tickers=delayed_tickers,
     )
 
 
@@ -233,6 +258,15 @@ with st.sidebar:
         "Weighting method",
         ["Equal weight each ticker", "Equal weight each tier"],
         index=0,
+    )
+
+    staged_entry = st.checkbox(
+        "Stage in tickers that lack start-date prices",
+        value=True,
+        help=(
+            "When enabled, a ticker that lacks a price at the basket start keeps its intended "
+            "allocation as cash until its first available close. When disabled, those tickers are excluded."
+        ),
     )
 
     st.header("Include tiers")
@@ -287,7 +321,7 @@ if prices.empty:
     st.stop()
 
 try:
-    basket = build_basket(prices, selected_tickers, base_value, weighting_mode)
+    basket = build_basket(prices, selected_tickers, base_value, weighting_mode, staged_entry)
 except ValueError as exc:
     st.error(str(exc))
     st.stop()
@@ -303,9 +337,15 @@ c2.metric("Starting value", f"${start_value:,.2f}")
 c3.metric("Dollar P/L", f"${absolute_return:,.2f}")
 c4.metric("Included tickers", len(basket.included_tickers))
 
+if basket.delayed_tickers:
+    st.info(
+        "Staged entry: allocation held as cash until first available price for: "
+        + ", ".join(basket.delayed_tickers)
+    )
+
 if basket.excluded_tickers:
     st.warning(
-        "Excluded because they did not have price data at the basket start date: "
+        "Excluded because they had no usable price data under the current settings: "
         + ", ".join(basket.excluded_tickers)
     )
 
@@ -351,6 +391,7 @@ st.plotly_chart(fig_weights, use_container_width=True)
 st.subheader("Holdings")
 holdings = pd.DataFrame({
     "Tier": [TICKER_TO_TIER[t] for t in basket.included_tickers],
+    "First price date": basket.start_dates,
     "Start price": basket.start_prices,
     "Shares held": basket.shares,
     "Latest price": basket.prices.iloc[-1],
@@ -361,6 +402,7 @@ holdings["Ticker return"] = holdings["Latest price"] / holdings["Start price"] -
 holdings = holdings.sort_values("Latest value", ascending=False)
 st.dataframe(
     holdings.style.format({
+        "First price date": lambda x: pd.to_datetime(x).strftime("%Y-%m-%d"),
         "Start price": "${:,.2f}",
         "Shares held": "{:,.4f}",
         "Latest price": "${:,.2f}",
@@ -386,16 +428,22 @@ chart_mode = st.radio(
 
 if chart_tickers:
     if chart_mode == "Indexed price return":
-        chart_data = basket.prices[chart_tickers] / basket.prices[chart_tickers].iloc[0] * 100
-        y_label = "Indexed value, start = 100"
+        chart_data = basket.prices[chart_tickers].copy()
+        # Staged-entry tickers have blank prices before their first trading date.
+        # Index each ticker from its own first valid price instead of the basket's first row.
+        first_prices = chart_data.apply(lambda s: s.dropna().iloc[0] if not s.dropna().empty else pd.NA)
+        chart_data = chart_data.divide(first_prices, axis=1) * 100
+        y_label = "Indexed value, first price = 100"
     elif chart_mode == "Price":
         chart_data = basket.prices[chart_tickers]
         y_label = "Price"
     else:
+        # This includes staged-entry cash before the ticker's first available price.
         chart_data = basket.value_by_ticker[chart_tickers]
-        y_label = "Holding value"
+        y_label = "Holding value, including staged cash"
 
-    chart_df = chart_data.reset_index().rename(columns={"index": "Date"})
+    chart_df = chart_data.reset_index()
+    chart_df = chart_df.rename(columns={chart_df.columns[0]: "Date"})
     chart_long = chart_df.melt(id_vars="Date", var_name="Ticker", value_name=y_label)
     fig_tickers = px.line(chart_long, x="Date", y=y_label, color="Ticker")
     st.plotly_chart(fig_tickers, use_container_width=True)
@@ -419,7 +467,7 @@ st.download_button(
 # Long-format export of underlying price data.
 # reset_index() may name the date column "index", "Date", or something else
 # depending on the DataFrame index name, so rename the first column explicitly.
-underlying_prices_wide = basket.prices.reset_index()
+underlying_prices_wide = basket.prices.ffill().reset_index()
 underlying_prices_wide = underlying_prices_wide.rename(
     columns={underlying_prices_wide.columns[0]: "date"}
 )
