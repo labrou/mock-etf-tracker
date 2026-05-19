@@ -25,7 +25,6 @@ from typing import Dict, List, Tuple
 
 import pandas as pd
 import plotly.express as px
-import requests
 import streamlit as st
 import yfinance as yf
 
@@ -57,7 +56,7 @@ TIERS: Dict[str, List[str]] = {
         "MU", "WDC", "STX", "SNDK", "EWY"
     ],
     "Tier 9 — AI-utility plays, contracted revenue cushion": [
-        "VST", "CEG", "TLN", "NRG", "NEE", "GEV", "D"
+        "VST", "CEG", "TLN", "NRG", "NEE", "GEV", 
     ],
     "Tier 10 — Server integrators, track NVIDIA cadence": [
         "SMCI", "DELL", "HPE", "PSTG"
@@ -116,21 +115,20 @@ def download_one_ticker(ticker: str, start: dt.date, end: dt.date) -> pd.Series:
 
     def fetch(symbol: str) -> pd.Series:
         time.sleep(0.5)  # Throttle to prevent Yahoo rate-limiting on cloud IPs
-        session = requests.Session()
-        session.headers.update({
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-        })
+        try:
+            data = yf.download(
+                symbol,
+                start=start.isoformat(),
+                end=end_plus_one.isoformat(),
+                auto_adjust=True,
+                progress=False,
+                threads=False,
+            )
+        except Exception:
+            # Catch network timeouts, connection drops, or JSON decode errors gracefully
+            return pd.Series(dtype="float64", name=symbol)
 
-        data = yf.download(
-            symbol,
-            start=start.isoformat(),
-            end=end_plus_one.isoformat(),
-            auto_adjust=True,
-            progress=False,
-            threads=False,
-            session=session,
-        )
-        if data.empty:
+        if data is None or data.empty or "Close" not in data:
             return pd.Series(dtype="float64", name=symbol)
 
         close = data["Close"]
