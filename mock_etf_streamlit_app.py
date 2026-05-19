@@ -280,6 +280,13 @@ with st.sidebar:
         help="Applies a logarithmic y-axis to all charts.",
     )
 
+    tier_chart_mode = st.radio(
+        "Tier sleeve chart value",
+        ["Indexed value", "Dollar value"],
+        index=0,
+        help="Indexed value starts each selected tier at 100 for cleaner cohort comparison.",
+    )
+
     st.header("Custom session tickers")
 
     if "custom_tickers_by_tier" not in st.session_state:
@@ -436,10 +443,17 @@ apply_y_axis_scale(fig, use_log_scale)
 st.plotly_chart(fig, use_container_width=True)
 
 st.subheader("Tier sleeves")
-tier_plot = basket.value_by_tier.reset_index()
+tier_chart_values = basket.value_by_tier.copy()
+if tier_chart_mode == "Indexed value":
+    tier_chart_values = tier_chart_values.divide(tier_chart_values.iloc[0]) * 100
+    tier_y_label = "Indexed value, start = 100"
+else:
+    tier_y_label = "Value"
+
+tier_plot = tier_chart_values.reset_index()
 tier_plot = tier_plot.rename(columns={tier_plot.columns[0]: "Date"})
-tier_long = tier_plot.melt(id_vars="Date", var_name="Tier", value_name="Value")
-fig_tier = px.line(tier_long, x="Date", y="Value", color="Tier")
+tier_long = tier_plot.melt(id_vars="Date", var_name="Tier", value_name=tier_y_label)
+fig_tier = px.line(tier_long, x="Date", y=tier_y_label, color="Tier")
 apply_y_axis_scale(fig_tier, use_log_scale)
 st.plotly_chart(fig_tier, use_container_width=True)
 
@@ -449,7 +463,7 @@ facet_rows = max(1, (basket.value_by_tier.shape[1] + 2) // 3)
 fig_tier_faceted = px.line(
     tier_long,
     x="Date",
-    y="Value",
+    y=tier_y_label,
     facet_col="Tier",
     facet_col_wrap=3,
     height=max(420, 280 * facet_rows),
