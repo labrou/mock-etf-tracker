@@ -19,7 +19,6 @@ This is for research/watchlist use, not investment advice.
 from __future__ import annotations
 
 import datetime as dt
-import time
 from dataclasses import dataclass
 from typing import Dict, List, Tuple
 
@@ -108,16 +107,59 @@ DEFAULT_SUBTITLE = (
 st.caption(DEFAULT_SUBTITLE)
 
 
-@st.cache_data(show_spinner=False, ttl=60 * 60)
-def download_one_ticker(ticker: str, start: dt.date, end: dt.date) -> pd.Series:
-    """Download adjusted close history. Special handling for KEEL/BITF history."""
+def _fetch_single(symbol: str, start: dt.date, end: dt.date) -> pd.Series:
+    """Download adjusted close for one symbol; returns empty Series on failure."""
     end_plus_one = end + dt.timedelta(days=1)
+    try:
+        data = yf.download(
+            symbol,
+            start=start.isoformat(),
+            end=end_plus_one.isoformat(),
+            auto_adjust=True,
+            progress=False,
+            threads=False,
+        )
+    except Exception:
+        return pd.Series(dtype="float64", name=symbol)
+    if data is None or data.empty or "Close" not in data:
+        return pd.Series(dtype="float64", name=symbol)
+    close = data["Close"]
+    if isinstance(close, pd.DataFrame):
+        close = close.iloc[:, 0]
+    close.name = symbol
+    close.index = pd.to_datetime(close.index).tz_localize(None)
+    return close.dropna()
 
-    def fetch(symbol: str) -> pd.Series:
-        time.sleep(0.5)  # Throttle to prevent Yahoo rate-limiting on cloud IPs
+
+@st.cache_data(show_spinner=False, ttl=60 * 60)
+def _download_keel(start: dt.date, end: dt.date) -> pd.Series:
+    """KEEL changed ticker from BITF; splice both series together."""
+    keel = _fetch_single("KEEL", start, end)
+    bitf = _fetch_single("BITF", start, end)
+    combined = pd.concat([bitf, keel]).sort_index()
+    combined = combined[~combined.index.duplicated(keep="last")]
+    combined.name = "KEEL"
+    return combined
+
+
+@st.cache_data(show_spinner=False, ttl=60 * 60)
+def download_prices(tickers: Tuple[str, ...], start: dt.date, end: dt.date) -> pd.DataFrame:
+    """Batch-download all tickers in one request to avoid cloud IP rate-limiting.
+
+    Yahoo Finance blocks per-ticker loops quickly on shared cloud IPs (Streamlit Cloud,
+    AWS, GCP). A single batch call with all symbols stays under the rate limit.
+    KEEL is handled separately because it splices in BITF history.
+    """
+    end_plus_one = end + dt.timedelta(days=1)
+    has_keel = "KEEL" in tickers
+    batch = [t for t in tickers if t != "KEEL"]
+
+    frames: Dict[str, pd.Series] = {}
+
+    if batch:
         try:
             data = yf.download(
-                symbol,
+                batch,
                 start=start.isoformat(),
                 end=end_plus_one.isoformat(),
                 auto_adjust=True,
@@ -125,43 +167,30 @@ def download_one_ticker(ticker: str, start: dt.date, end: dt.date) -> pd.Series:
                 threads=False,
             )
         except Exception:
-            # Catch network timeouts, connection drops, or JSON decode errors gracefully
-            return pd.Series(dtype="float64", name=symbol)
+            data = None
 
-        if data is None or data.empty or "Close" not in data:
-            return pd.Series(dtype="float64", name=symbol)
+        if data is not None and not data.empty and "Close" in data:
+            close = data["Close"]
+            if isinstance(close, pd.Series):
+                # Single ticker in batch returns a plain Series
+                close = close.to_frame(name=batch[0])
+            close.index = pd.to_datetime(close.index).tz_localize(None)
+            for ticker in close.columns:
+                s = close[ticker].dropna()
+                if not s.empty:
+                    frames[ticker] = s
 
-        close = data["Close"]
-        if isinstance(close, pd.DataFrame):
-            close = close.iloc[:, 0]
-        close.name = symbol
-        close.index = pd.to_datetime(close.index).tz_localize(None)
-        return close.dropna()
+    if has_keel:
+        keel = _download_keel(start, end)
+        if not keel.empty:
+            frames["KEEL"] = keel
 
-    if ticker == "KEEL":
-        keel = fetch("KEEL")
-        bitf = fetch("BITF")
-        combined = pd.concat([bitf, keel]).sort_index()
-        combined = combined[~combined.index.duplicated(keep="last")]
-        combined.name = "KEEL"
-        return combined
-
-    return fetch(ticker)
-
-
-@st.cache_data(show_spinner=False, ttl=60 * 60)
-def download_prices(tickers: Tuple[str, ...], start: dt.date, end: dt.date) -> pd.DataFrame:
-    series = []
-    for ticker in tickers:
-        s = download_one_ticker(ticker, start, end)
-        if not s.empty:
-            series.append(s)
-
-    if not series:
+    if not frames:
         return pd.DataFrame()
 
-    prices = pd.concat(series, axis=1).sort_index()
-    prices = prices.ffill()
+    prices = pd.concat(list(frames.values()), axis=1)
+    prices.columns = pd.Index(list(frames.keys()))
+    prices = prices.sort_index().ffill()
     return prices
 
 
@@ -449,7 +478,8 @@ if basket.excluded_tickers:
     )
 
 st.subheader("Synthetic ETF value")
-plot_df = basket.total_value.rename("Mock ETF value").reset_index().rename(columns={"index": "Date"})
+plot_df = basket.total_value.rename("Mock ETF value").reset_index()
+plot_df = plot_df.rename(columns={plot_df.columns[0]: "Date"})
 fig = px.line(plot_df, x="Date", y="Mock ETF value")
 apply_y_axis_scale(fig, use_log_scale)
 st.plotly_chart(fig, use_container_width=True)
@@ -495,7 +525,7 @@ latest_tiers = basket.value_by_tier.iloc[-1].sort_values(ascending=False)
 weights = (latest_tiers / latest_tiers.sum()).rename("Weight").reset_index()
 weights.columns = ["Tier", "Weight"]
 fig_weights = px.bar(weights, x="Tier", y="Weight")
-apply_y_axis_scale(fig_weights, use_log_scale)
+# Log scale doesn't apply to fractional weights (near-zero → −∞ bars).
 st.plotly_chart(fig_weights, use_container_width=True)
 
 st.subheader("Holdings")
@@ -541,7 +571,7 @@ if chart_tickers:
         chart_data = basket.prices[chart_tickers].copy()
         # Staged-entry tickers have blank prices before their first trading date.
         # Index each ticker from its own first valid price instead of the basket's first row.
-        first_prices = chart_data.apply(lambda s: s.dropna().iloc[0] if not s.dropna().empty else pd.NA)
+        first_prices = chart_data.apply(lambda s: s.dropna().iloc[0] if s.notna().any() else pd.NA)
         chart_data = chart_data.divide(first_prices, axis=1) * 100
         y_label = "Indexed value, first price = 100"
     elif chart_mode == "Price":
@@ -578,7 +608,7 @@ st.download_button(
 # Long-format export of underlying price data.
 # reset_index() may name the date column "index", "Date", or something else
 # depending on the DataFrame index name, so rename the first column explicitly.
-underlying_prices_wide = basket.prices.ffill().reset_index()
+underlying_prices_wide = basket.prices.reset_index()
 underlying_prices_wide = underlying_prices_wide.rename(
     columns={underlying_prices_wide.columns[0]: "date"}
 )
