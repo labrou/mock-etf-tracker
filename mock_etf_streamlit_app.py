@@ -96,8 +96,8 @@ st.set_page_config(page_title="Mock ETF Tracker for AI-fueled ticker cohorts", p
 st.title("Mock ETF Tracker for AI-fueled ticker cohorts")
 
 DEFAULT_SUBTITLE = (
-    "As much as I love AI, all bubbles burst, usually in tiers/cohorts." 
-    "Tiers are organized in the order they might come under pressure and unwind."
+    "As much as I love AI, all bubbles burst, usually in tiers/cohorts. " 
+    "Tiers are organized in the order they might come under pressure and unwind. "
     "This app builds a synthetic equal-dollar basket from user-defined AI-related ticker cohorts. "
     "It downloads adjusted historical prices, creates fixed-share holdings from the selected start date, "
     "tracks total basket value, compares cohort sleeves, displays current sleeve weights, and exports the underlying price data. "
