@@ -54,25 +54,22 @@ TIERS: Dict[str, List[str]] = {
     "Tier 8 — Memory cycle": [
         "MU", "WDC", "STX", "SNDK", "EWY"
     ],
-    "Tier 9 — AI-utility plays, contracted revenue cushion": [
-        "VST", "CEG", "TLN", "NRG", "NEE", "GEV", 
-    ],
-    "Tier 10 — Server integrators, track NVIDIA cadence": [
+    "Tier 9 — Server integrators, track NVIDIA cadence": [
         "SMCI", "DELL", "HPE", "PSTG"
     ],
-    "Tier 11 — Cooling/power/networking infrastructure, backlog cushion": [
+    "Tier 10 — Cooling/power/networking infrastructure, backlog cushion": [
         "VRT", "ETN", "MOD", "AAON", "PH", "TT", "ANET", "POWL", "HUBB"
     ],
-    "Tier 12 — Data center REITs, lease-contract support": [
+    "Tier 11 — Data center REITs, lease-contract support": [
         "DLR", "EQIX", "IRM"
     ],
-    "Tier 13 — Semi cap equipment, diversified end-markets": [
+    "Tier 12 — Semi cap equipment, diversified end-markets": [
         "AMAT", "LRCX", "KLAC", "NVMI", "ONTO", "ASML", "TER"
     ],
-    "Tier 14 — The Champ Chips": [
+    "Tier 13 — The Champ Chips": [
         "NVDA", "AVGO", "AMD", "MRVL", "ARM", "INTC", "MPWR", "QCOM"
     ],
-    "Tier 15 — Hyperscalers": [
+    "Tier 14 — Hyperscalers": [
         "AMZN", "GOOGL", "META", "MSFT", "ORCL"
     ],
 }
@@ -107,54 +104,59 @@ DEFAULT_SUBTITLE = (
 st.caption(DEFAULT_SUBTITLE)
 
 
-def _fetch_single(symbol: str, start: dt.date, end: dt.date) -> pd.Series:
-    """Download adjusted close for one symbol; returns empty Series on failure."""
+def _strip_tz(index: pd.DatetimeIndex) -> pd.DatetimeIndex:
+    idx = pd.to_datetime(index)
+    return idx.tz_localize(None) if idx.tz is None else idx.tz_convert(None)
+
+
+def _fetch_single(symbol: str, start: dt.date, end: dt.date) -> pd.DataFrame:
+    """Download adjusted close + volume for one symbol; returns empty DataFrame on failure."""
     end_plus_one = end + dt.timedelta(days=1)
     try:
         data = yf.download(
             symbol,
             start=start.isoformat(),
             end=end_plus_one.isoformat(),
-            auto_adjust=True,
             progress=False,
-            threads=False,
+            multi_level_index=False,  # flat columns for single-ticker string input
         )
     except Exception:
-        return pd.Series(dtype="float64", name=symbol)
+        return pd.DataFrame(columns=["Close", "Volume"])
     if data is None or data.empty or "Close" not in data:
-        return pd.Series(dtype="float64", name=symbol)
-    close = data["Close"]
-    if isinstance(close, pd.DataFrame):
-        close = close.iloc[:, 0]
-    close.name = symbol
-    close.index = pd.to_datetime(close.index).tz_localize(None)
-    return close.dropna()
+        return pd.DataFrame(columns=["Close", "Volume"])
+    cols = [c for c in ["Close", "Volume"] if c in data.columns]
+    result = data[cols].copy()
+    result.index = _strip_tz(result.index)
+    return result.dropna(subset=["Close"])
 
 
 @st.cache_data(show_spinner=False, ttl=60 * 60)
-def _download_keel(start: dt.date, end: dt.date) -> pd.Series:
+def _download_keel(start: dt.date, end: dt.date) -> pd.DataFrame:
     """KEEL changed ticker from BITF; splice both series together."""
     keel = _fetch_single("KEEL", start, end)
     bitf = _fetch_single("BITF", start, end)
     combined = pd.concat([bitf, keel]).sort_index()
     combined = combined[~combined.index.duplicated(keep="last")]
-    combined.name = "KEEL"
     return combined
 
 
 @st.cache_data(show_spinner=False, ttl=60 * 60)
-def download_prices(tickers: Tuple[str, ...], start: dt.date, end: dt.date) -> pd.DataFrame:
+def download_prices(
+    tickers: Tuple[str, ...], start: dt.date, end: dt.date
+) -> Tuple[pd.DataFrame, pd.DataFrame]:
     """Batch-download all tickers in one request to avoid cloud IP rate-limiting.
 
     Yahoo Finance blocks per-ticker loops quickly on shared cloud IPs (Streamlit Cloud,
     AWS, GCP). A single batch call with all symbols stays under the rate limit.
     KEEL is handled separately because it splices in BITF history.
+    Returns (prices, volumes) — both DataFrames indexed by date, columns by ticker.
     """
     end_plus_one = end + dt.timedelta(days=1)
     has_keel = "KEEL" in tickers
     batch = [t for t in tickers if t != "KEEL"]
 
-    frames: Dict[str, pd.Series] = {}
+    price_frames: Dict[str, pd.Series] = {}
+    volume_frames: Dict[str, pd.Series] = {}
 
     if batch:
         try:
@@ -162,36 +164,50 @@ def download_prices(tickers: Tuple[str, ...], start: dt.date, end: dt.date) -> p
                 batch,
                 start=start.isoformat(),
                 end=end_plus_one.isoformat(),
-                auto_adjust=True,
                 progress=False,
-                threads=False,
             )
         except Exception:
             data = None
 
         if data is not None and not data.empty and "Close" in data:
             close = data["Close"]
+            volume = data["Volume"] if "Volume" in data else pd.DataFrame()
             if isinstance(close, pd.Series):
-                # Single ticker in batch returns a plain Series
                 close = close.to_frame(name=batch[0])
-            close.index = pd.to_datetime(close.index).tz_localize(None)
+            if isinstance(volume, pd.Series):
+                volume = volume.to_frame(name=batch[0])
+            close.index = _strip_tz(close.index)
+            if not volume.empty:
+                volume.index = _strip_tz(volume.index)
             for ticker in close.columns:
                 s = close[ticker].dropna()
                 if not s.empty:
-                    frames[ticker] = s
+                    price_frames[ticker] = s
+                    if not volume.empty and ticker in volume.columns:
+                        volume_frames[ticker] = volume[ticker]
 
     if has_keel:
         keel = _download_keel(start, end)
         if not keel.empty:
-            frames["KEEL"] = keel
+            price_frames["KEEL"] = keel["Close"].dropna()
+            if "Volume" in keel.columns:
+                volume_frames["KEEL"] = keel["Volume"]
 
-    if not frames:
-        return pd.DataFrame()
+    if not price_frames:
+        return pd.DataFrame(), pd.DataFrame()
 
-    prices = pd.concat(list(frames.values()), axis=1)
-    prices.columns = pd.Index(list(frames.keys()))
+    prices = pd.concat(list(price_frames.values()), axis=1)
+    prices.columns = pd.Index(list(price_frames.keys()))
     prices = prices.sort_index().ffill()
-    return prices
+
+    if volume_frames:
+        volumes = pd.concat(list(volume_frames.values()), axis=1)
+        volumes.columns = pd.Index(list(volume_frames.keys()))
+        volumes = volumes.sort_index()
+    else:
+        volumes = pd.DataFrame()
+
+    return prices, volumes
 
 
 def build_basket(
@@ -433,8 +449,9 @@ if start_date >= end_date:
     st.warning("Start date must be before end date.")
     st.stop()
 
+all_tickers = tuple(t for tickers in working_tiers.values() for t in tickers)
 with st.spinner("Downloading price history..."):
-    prices = download_prices(tuple(selected_tickers), start_date, end_date)
+    prices, volumes = download_prices(all_tickers, start_date, end_date)
 
 if prices.empty:
     st.error("No price data returned. Try a different date range or fewer tickers.")
@@ -620,6 +637,15 @@ underlying_prices = underlying_prices_wide.melt(
 )
 underlying_prices["cohort"] = underlying_prices["ticker"].map(ticker_to_tier)
 underlying_prices = underlying_prices[["date", "ticker", "cohort", "closing_price"]]
+
+if not volumes.empty:
+    vol_tickers = [t for t in basket.included_tickers if t in volumes.columns]
+    if vol_tickers:
+        vol_wide = volumes[vol_tickers].reset_index()
+        vol_wide = vol_wide.rename(columns={vol_wide.columns[0]: "date"})
+        vol_long = vol_wide.melt(id_vars="date", var_name="ticker", value_name="volume")
+        underlying_prices = underlying_prices.merge(vol_long, on=["date", "ticker"], how="left")
+
 underlying_prices = underlying_prices.sort_values(["date", "cohort", "ticker"])
 underlying_prices["date"] = pd.to_datetime(underlying_prices["date"]).dt.strftime("%Y-%m-%d")
 
