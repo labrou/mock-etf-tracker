@@ -130,7 +130,7 @@ def _fetch_single(symbol: str, start: dt.date, end: dt.date) -> pd.DataFrame:
     return result.dropna(subset=["Close"])
 
 
-@st.cache_data(show_spinner=False, ttl=60 * 60)
+@st.cache_data(show_spinner=False, ttl=4 * 60 * 60)
 def _download_keel(start: dt.date, end: dt.date) -> pd.DataFrame:
     """KEEL changed ticker from BITF; splice both series together."""
     keel = _fetch_single("KEEL", start, end)
@@ -140,7 +140,7 @@ def _download_keel(start: dt.date, end: dt.date) -> pd.DataFrame:
     return combined
 
 
-@st.cache_data(show_spinner=False, ttl=60 * 60)
+@st.cache_data(show_spinner=False, ttl=4 * 60 * 60)
 def download_prices(
     tickers: Tuple[str, ...], start: dt.date, end: dt.date
 ) -> Tuple[pd.DataFrame, pd.DataFrame]:
@@ -210,6 +210,7 @@ def download_prices(
     return prices, volumes
 
 
+@st.cache_data(show_spinner=False)
 def build_basket(
     prices: pd.DataFrame,
     selected_tickers: List[str],
